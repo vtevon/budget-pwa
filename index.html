@@ -809,11 +809,11 @@
                 return;
             }
 
-            // CLEANUP: Strip problematic artifacts
+            // CLEANUP
             label = label.replace(/\bcarte\b/gi, '')
-                         .replace(/\b\d{2}\/\d{2}(?:\/\d{2,4})?\b/g, '') // Removes dates
-                         .replace(/\bcb\s*\*\s*\S+/gi, '') // Removes CB*XXXX
-                         .replace(/['’]/g, ' ') // Apostrophes to spaces
+                         .replace(/\b\d{2}\/\d{2}(?:\/\d{2,4})?\b/g, '') 
+                         .replace(/\bcb\s*\*\s*\S+/gi, '') 
+                         .replace(/['’]/g, ' ') 
                          .replace(/^[- \t_]+|[- \t_]+$/g, '')
                          .replace(/\s+/g, ' ')
                          .trim();
@@ -832,7 +832,41 @@
             csvOccurrences[baseId] = (csvOccurrences[baseId] || 0) + 1;
             const deterministicId = `${baseId}_${csvOccurrences[baseId]}`;
 
-            if (!transactions[deterministicId]) {
+            // --- NOUVEAU SYSTÈME ANTI-DOUBLONS ---
+            let alreadyExists = false;
+
+            // 1. L'opération exacte existe-t-elle déjà ?
+            if (transactions[deterministicId]) {
+                alreadyExists = true;
+            }
+            
+            // 2. L'opération a-t-elle été scindée manuellement ?
+            if (!alreadyExists) {
+                const isSplit = Object.keys(transactions).some(k => k.includes(deterministicId) && k.startsWith('split'));
+                if (isSplit) alreadyExists = true;
+            }
+
+            // 3. La banque a-t-elle décalé la date de valeur (Tolérance de 3 jours) ?
+            if (!alreadyExists) {
+                const txTime = new Date(parseDateToISO(dateVal)).getTime();
+                const searchPattern = `_${label}_${amount.toFixed(2)}`; 
+                
+                const isBankDateShift = Object.values(transactions).some(tx => {
+                    if (tx.id.includes(searchPattern)) {
+                        const existingTime = new Date(tx.isoDate).getTime();
+                        const diffDays = Math.abs(txTime - existingTime) / (1000 * 3600 * 24);
+                        return diffDays > 0 && diffDays <= 3;
+                    }
+                    return false;
+                });
+                
+                if (isBankDateShift) {
+                    alreadyExists = true;
+                }
+            }
+            // --- FIN DU SYSTÈME ANTI-DOUBLONS ---
+
+            if (!alreadyExists) {
                 transactions[deterministicId] = {
                     id: deterministicId, 
                     dateStr: dateVal, 
@@ -853,7 +887,6 @@
             showAlert("Aucune nouvelle opération trouvée. Ce fichier a probablement déjà été importé !");
         }
     }
-
     function parseDateToISO(dateStr) {
         const parts = dateStr.split('/');
         if(parts.length === 3) return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
