@@ -1029,7 +1029,7 @@
         } else {
             showAlert("Aucune nouvelle opération trouvée. Ce fichier a probablement déjà été importé !");
         }
-        
+
     }function parseDateToISO(dateStr) {
         const parts = dateStr.split('/');
         if(parts.length === 3) return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
@@ -1902,8 +1902,13 @@
     }
     if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
-            .then(reg => console.log('Service Worker enregistré'))
+        // Le "?v=" suivi de la date force le navigateur à télécharger la dernière version
+        const swUrl = './sw.js?v=' + new Date().getTime();
+        navigator.serviceWorker.register(swUrl)
+            .then(reg => {
+                console.log('Service Worker enregistré');
+                reg.update(); // Force la mise à jour
+            })
             .catch(err => console.log('Erreur SW:', err));
     });
 }
