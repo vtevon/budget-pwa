@@ -887,7 +887,150 @@
             showAlert("Aucune nouvelle opération trouvée. Ce fichier a probablement déjà été importé !");
         }
     }
-    function parseDateToISO(dateStr) {
+    function processTransactions(data, isBourso, isWise) {
+        let addedCount = 0;
+        const csvOccurrences = {}; 
+
+        data.forEach(row => {
+            let dateVal, label, amount, category = "Autre";
+
+            const getVal = (keys) => {
+                for(let k of keys) {
+                    let foundKey = Object.keys(row).find(rk => {
+                        let cleanRk = rk.replace(/[\u200B-\u200D\uFEFF"]/g, '').trim().toLowerCase();
+                        return cleanRk === k.toLowerCase() || cleanRk === `"${k.toLowerCase()}"`;
+                    });
+                    if (foundKey && row[foundKey] !== undefined && row[foundKey] !== null && row[foundKey] !== "") {
+                        return String(row[foundKey]).trim();
+                    }
+                }
+                return "";
+            };
+
+            if (isBourso) {
+                let rawDate = getVal(['dateval', 'date op', 'date']);
+                let rawAmt = getVal(['amount', 'montant']);
+                if (!rawDate || !rawAmt) return;
+                
+                dateVal = rawDate;
+                const rowKeys = Object.keys(row);
+                label = (rowKeys.length > 3 ? row[rowKeys[3]] : getVal(['label', 'libelle', 'libellé'])) || "Opération";
+                
+                let cleanAmt = rawAmt.replace(/[\s\u00A0\u202F\u200B]/g, '').replace(',', '.');
+                amount = parseFloat(cleanAmt);
+            } else if (isWise) {
+                let rawAmt = getVal(['amount', 'montant', 'target amount', 'source amount']);
+                if (!rawAmt) return;
+                
+                dateVal = getVal(['date', 'created on', 'finished on']) || "01/01/2000";
+                if (dateVal.includes('-')) {
+                    const parts = dateVal.split('-');
+                    if(parts[0].length === 4) dateVal = `${parts[2]}/${parts[1]}/${parts[0]}`; 
+                    else dateVal = dateVal.replace(/-/g, '/'); 
+                }
+                
+                label = getVal(['merchant', 'marchand', 'payee name', 'target name', 'description']) || "Wise Tx";
+                
+                let cleanAmt = rawAmt.replace(/[\s\u00A0\u202F\u200B]/g, '').replace(',', '.');
+                amount = parseFloat(cleanAmt) / 1.61;
+            } else {
+                return;
+            }
+
+            // NETTOYAGE DU LIBELLÉ
+            label = label.replace(/\bcarte\b/gi, '')
+                         .replace(/\b\d{2}\/\d{2}(?:\/\d{2,4})?\b/g, '') 
+                         .replace(/\bcb\s*\*\s*\S+/gi, '') 
+                         .replace(/['’]/g, ' ') 
+                         .replace(/^[- \t_]+|[- \t_]+$/g, '')
+                         .replace(/\s+/g, ' ')
+                         .trim();
+            label = label || "Opération";
+
+            const normLabel = normalizeStr(label);
+            rules.forEach(rule => { 
+                if (normLabel.includes(normalizeStr(rule.keyword))) {
+                    category = rule.category; 
+                }
+            });
+
+            if(!myCategories.has(category)) myCategories.add(category);
+
+            const baseId = `${dateVal}_${label}_${amount.toFixed(2)}`;
+            csvOccurrences[baseId] = (csvOccurrences[baseId] || 0) + 1;
+            const deterministicId = `${baseId}_${csvOccurrences[baseId]}`;
+
+            // --- SYSTÈME ANTI-DOUBLONS ROBUSTE ---
+            let alreadyExists = false;
+            
+            // 1. Recherche EXACTE (Indépendante de l'ID)
+            // Filtre par Montant exact, Date exacte, et Libellé (actuel ou d'origine)
+            const exactMatches = Object.values(transactions).filter(tx => {
+                const isSameDate = tx.isoDate === parseDateToISO(dateVal);
+                const isSameAmount = Math.abs(tx.amount - amount) < 0.01;
+                const txNormLabel = normalizeStr(tx.label);
+                const txNormId = normalizeStr(tx.id);
+                const isSameLabel = txNormLabel.includes(normLabel) || normLabel.includes(txNormLabel) || txNormId.includes(normLabel);
+                
+                return isSameDate && isSameAmount && isSameLabel;
+            });
+
+            // Si on a déjà autant d'opérations identiques en base que dans ce fichier CSV
+            if (exactMatches.length >= csvOccurrences[baseId]) {
+                alreadyExists = true;
+            }
+
+            // 2. Recherche par DÉCALAGE BANCAIRE (Tolérance de 3 jours)
+            if (!alreadyExists) {
+                const txTime = new Date(parseDateToISO(dateVal)).getTime();
+                const shiftedMatch = Object.values(transactions).some(tx => {
+                    const isSameAmount = Math.abs(tx.amount - amount) < 0.01;
+                    const diffDays = Math.abs(txTime - new Date(tx.isoDate).getTime()) / (1000 * 3600 * 24);
+                    const isCloseDate = diffDays > 0 && diffDays <= 3;
+                    const txNormLabel = normalizeStr(tx.label);
+                    const txNormId = normalizeStr(tx.id);
+                    const isSameLabel = txNormLabel.includes(normLabel) || normLabel.includes(txNormLabel) || txNormId.includes(normLabel);
+                    
+                    return isSameAmount && isCloseDate && isSameLabel;
+                });
+                
+                if (shiftedMatch) alreadyExists = true;
+            }
+
+            // 3. Recherche des SCISSIONS (Vérifie si l'ID d'une sous-opération contient les infos d'origine)
+            if (!alreadyExists) {
+                const isSplit = Object.keys(transactions).some(k => {
+                    const normK = normalizeStr(k);
+                    return normK.startsWith('split') && 
+                           normK.includes(amount.toFixed(2)) && 
+                           normK.includes(normLabel);
+                });
+                if (isSplit) alreadyExists = true;
+            }
+            // --- FIN DU SYSTÈME ANTI-DOUBLONS ---
+
+            if (!alreadyExists) {
+                transactions[deterministicId] = {
+                    id: deterministicId, 
+                    dateStr: dateVal, 
+                    isoDate: parseDateToISO(dateVal),
+                    label: label, 
+                    category: category, 
+                    amount: amount
+                };
+                addedCount++;
+            }
+        });
+
+        if (addedCount > 0) { 
+            saveData(); 
+            applyDatePreset(); 
+            showAlert(`${addedCount} nouvelles transactions importées.`); 
+        } else {
+            showAlert("Aucune nouvelle opération trouvée. Ce fichier a probablement déjà été importé !");
+        }
+        
+    }function parseDateToISO(dateStr) {
         const parts = dateStr.split('/');
         if(parts.length === 3) return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
         return dateStr; 
